@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     tavily_api_key: str = ""
 
+    # Model Configurations (centralized as per code style guidelines)
+    gemini_model: str = "gemini-2.5-flash"
+    openrouter_model: str = "google/gemini-2.5-flash"
+
     # Model Configuration to read from .env file
     model_config = SettingsConfigDict(
         env_file=".env",

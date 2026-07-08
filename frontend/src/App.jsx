@@ -1,24 +1,31 @@
 import { useState, useEffect } from 'react'
 
 /**
- * App is the root component of the Multi-Agent Research Assistant frontend.
+ * App is the main dashboard component for the Multi-Agent Research Assistant.
  * 
- * It manages the connection state to the FastAPI backend and provides
- * a premium dashboard UI. Verifying this connection is the key milestone of Phase 0.
+ * It manages:
+ * 1. Diagnostic connection checks to /health.
+ * 2. User input and request state for the research agent endpoint (/research).
+ * 3. Render states for answers and clickable sources.
  */
 function App() {
+  // Connection state
   const [healthStatus, setHealthStatus] = useState('checking')
   const [lastChecked, setLastChecked] = useState(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  // Use VITE_API_URL if configured, otherwise fallback to local development port 8000.
+  // Research agent form states
+  const [query, setQuery] = useState('')
+  const [answer, setAnswer] = useState('')
+  const [sources, setSources] = useState([])
+  const [isResearching, setIsResearching] = useState(false)
+  const [researchError, setResearchError] = useState('')
+
+  // Configure endpoint fallback
   const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
   /**
-   * Fetches the server status from the backend's /health endpoint.
-   * 
-   * This logic exists to prove that the frontend and backend can successfully
-   * communicate across origins during development.
+   * Diagnostic function to fetch connection health.
    */
   const checkBackendHealth = async () => {
     setIsRefreshing(true)
@@ -38,22 +45,61 @@ function App() {
       setHealthStatus('disconnected')
     } finally {
       setLastChecked(new Date().toLocaleTimeString())
-      // Add a slight artificial delay for smooth transition and micro-animation feedback
       setTimeout(() => {
         setIsRefreshing(false)
       }, 500)
     }
   }
 
-  // Trigger health check on initial load.
+  /**
+   * Submits a user query to the backend agent endpoint.
+   * 
+   * Triggers loading state, invokes POST /research, parses the returned
+   * answer and source URLs, and handles fallback errors.
+   */
+  const handleResearchSubmit = async (e) => {
+    e.preventDefault()
+    if (!query.trim()) return
+
+    setIsResearching(true)
+    setResearchError('')
+    setAnswer('')
+    setSources([])
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/research`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query: query.trim() })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `Server returned ${response.status}`)
+      }
+
+      const data = await response.json()
+      setAnswer(data.answer)
+      setSources(data.sources || [])
+    } catch (err) {
+      console.error('Error running research:', err)
+      setResearchError(err.message || 'Failed to complete research request.')
+    } finally {
+      setIsResearching(false)
+    }
+  }
+
+  // Check health on initial load.
   useEffect(() => {
     checkBackendHealth()
   }, [])
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-purple-500/30 selection:text-purple-200">
-      {/* Header section with branding */}
-      <header className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-md sticky top-0 z-50">
+      {/* Navbar Header */}
+      <header className="border-b border-neutral-900 bg-neutral-900/40 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-purple-500/20">
@@ -64,114 +110,177 @@ function App() {
               <p className="text-xs text-neutral-400">Multi-Agent Assistant System</p>
             </div>
           </div>
-          <div className="flex items-center space-x-4">
-            <span className="text-xs px-2.5 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-neutral-400">
-              Phase 0: Plumbing
+          <div className="flex items-center space-x-3">
+            {/* Minimal inline connection badge */}
+            <span className="flex items-center space-x-1.5 bg-neutral-900 border border-neutral-800 rounded-full px-3 py-1 text-xs">
+              <span className={`h-2.5 w-2.5 rounded-full ${
+                healthStatus === 'connected' ? 'bg-emerald-500' :
+                healthStatus === 'checking' ? 'bg-amber-500 animate-pulse' : 'bg-rose-500'
+              }`} />
+              <span className="text-neutral-400">API Gateway</span>
             </span>
           </div>
         </div>
       </header>
 
-      {/* Main dashboard content container */}
-      <main className="flex-1 max-w-4xl mx-auto w-full px-6 py-12 flex flex-col justify-center">
-        <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-8 md:p-12 shadow-2xl relative overflow-hidden group">
-          {/* Subtle background gradient glow */}
-          <div className="absolute -top-40 -right-40 w-96 h-96 bg-purple-600/10 rounded-full blur-3xl group-hover:bg-purple-600/15 transition-all duration-700" />
-          <div className="absolute -bottom-40 -left-40 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl group-hover:bg-indigo-600/15 transition-all duration-700" />
-
-          <div className="relative z-10 space-y-8">
-            <div className="text-center md:text-left space-y-2">
-              <h2 className="text-3xl font-bold tracking-tight text-white">System Status Connection</h2>
-              <p className="text-neutral-400 text-base max-w-lg">
-                This diagnostic dashboard verifies the communication channel between the React client and the FastAPI backend.
-              </p>
-            </div>
-
-            {/* Health status visualization card */}
-            <div className="grid md:grid-cols-2 gap-6 items-center border-t border-b border-neutral-800/80 py-8">
-              <div className="space-y-4">
-                <div className="text-sm font-medium text-neutral-500 uppercase tracking-wider">
-                  Target Service Endpoint
-                </div>
-                <div className="flex items-center space-x-2 bg-neutral-950 px-4 py-3 rounded-xl border border-neutral-800 w-fit">
-                  <span className="font-mono text-sm text-purple-400">{API_BASE_URL}/health</span>
-                </div>
+      {/* Main Grid Workspace */}
+      <main className="flex-1 max-w-7xl mx-auto w-full px-6 py-10 grid md:grid-cols-3 gap-8">
+        
+        {/* Left diagnostics panel */}
+        <section className="space-y-6 md:col-span-1">
+          <div className="bg-neutral-900 border border-neutral-850 rounded-2xl p-6 shadow-md">
+            <h2 className="text-sm font-semibold uppercase text-neutral-400 tracking-wider mb-4">Diagnostics</h2>
+            
+            <div className="space-y-4">
+              <div className="flex flex-col space-y-1 bg-neutral-950 p-3.5 rounded-xl border border-neutral-900">
+                <span className="text-xs text-neutral-500">API Endpoint</span>
+                <span className="font-mono text-xs text-purple-400 break-all">{API_BASE_URL}/health</span>
               </div>
 
-              <div className="space-y-4">
-                <div className="text-sm font-medium text-neutral-500 uppercase tracking-wider">
-                  Connection Health
-                </div>
-                <div className="flex items-center space-x-3">
-                  {/* Status Indicator Lights */}
-                  {healthStatus === 'checking' && (
-                    <>
-                      <span className="relative flex h-4 w-4">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-4 w-4 bg-amber-500"></span>
-                      </span>
-                      <span className="font-medium text-amber-400">Verifying Connection...</span>
-                    </>
-                  )}
-                  {healthStatus === 'connected' && (
-                    <>
-                      <span className="relative flex h-4 w-4">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-4 w-4 bg-emerald-500"></span>
-                      </span>
-                      <span className="font-medium text-emerald-400">Connected to Backend</span>
-                    </>
-                  )}
-                  {(healthStatus === 'disconnected' || healthStatus === 'unhealthy') && (
-                    <>
-                      <span className="relative flex h-4 w-4">
-                        <span className="relative inline-flex rounded-full h-4 w-4 bg-rose-500"></span>
-                      </span>
-                      <span className="font-medium text-rose-500">Connection Failed</span>
-                    </>
-                  )}
-                </div>
+              <div className="flex items-center justify-between p-3.5 bg-neutral-950 rounded-xl border border-neutral-900">
+                <span className="text-xs text-neutral-500">Status</span>
+                <span className={`text-xs font-semibold uppercase ${
+                  healthStatus === 'connected' ? 'text-emerald-400' :
+                  healthStatus === 'checking' ? 'text-amber-400' : 'text-rose-400'
+                }`}>
+                  {healthStatus}
+                </span>
               </div>
-            </div>
 
-            {/* User actions and timestamps */}
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="text-sm text-neutral-400">
-                {lastChecked ? (
-                  <span>Last Checked: <strong className="text-neutral-200">{lastChecked}</strong></span>
-                ) : (
-                  <span>Status check pending...</span>
-                )}
+              <div className="text-2xs text-neutral-500 leading-tight">
+                {lastChecked ? `Last Pinged: ${lastChecked}` : 'Connecting...'}
               </div>
 
               <button
-                id="refresh-btn"
                 type="button"
                 onClick={checkBackendHealth}
                 disabled={isRefreshing}
-                className="w-full sm:w-auto flex items-center justify-center space-x-2 px-6 py-3 rounded-xl bg-white text-neutral-950 font-medium hover:bg-neutral-200 active:scale-95 disabled:opacity-50 disabled:pointer-events-none transition-all duration-200 cursor-pointer shadow-lg shadow-white/5"
+                className="w-full text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-white py-2 rounded-lg cursor-pointer transition-colors disabled:opacity-40"
               >
-                <svg
-                  className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`}
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M21 21v-5h-.581m0 0a8.003 8.003 0 11-15.357-2"
-                  />
-                </svg>
-                <span>{isRefreshing ? 'Checking...' : 'Check Status'}</span>
+                {isRefreshing ? 'Checking...' : 'Ping Gateway'}
               </button>
             </div>
           </div>
-        </div>
+          
+          <div className="bg-neutral-900 border border-neutral-850 rounded-2xl p-6 shadow-md text-xs text-neutral-400 space-y-3 leading-relaxed">
+            <h3 className="font-semibold text-neutral-300">Phase 1 Objectives:</h3>
+            <p>• Uses native LLM tool schemas to toggle web search.</p>
+            <p>• Fetches real-time search context using the Tavily API.</p>
+            <p>• Cites sources and renders references dynamically.</p>
+          </div>
+        </section>
+
+        {/* Right workspace panel (Agent client interface) */}
+        <section className="md:col-span-2 space-y-6">
+          <div className="bg-neutral-900 border border-neutral-850 rounded-2xl p-6 md:p-8 shadow-lg space-y-6">
+            <div className="space-y-1">
+              <h2 className="text-xl font-bold text-white">Ask the Research Agent</h2>
+              <p className="text-sm text-neutral-400 leading-normal">
+                Input a query. The agent decides if it requires web search to generate an up-to-date response.
+              </p>
+            </div>
+
+            {/* Research query form */}
+            <form onSubmit={handleResearchSubmit} className="space-y-4">
+              <div className="flex flex-col space-y-2">
+                <label htmlFor="query-input" className="text-xs text-neutral-400 font-medium">Research Query</label>
+                <div className="flex gap-3">
+                  <input
+                    id="query-input"
+                    type="text"
+                    required
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="e.g. What is the current temperature in Seattle?"
+                    disabled={isResearching}
+                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm text-white placeholder-neutral-600 focus:outline-none focus:border-purple-500 disabled:opacity-50 transition-colors"
+                  />
+                  
+                  <button
+                    id="submit-btn"
+                    type="submit"
+                    disabled={isResearching || !query.trim()}
+                    className="bg-white hover:bg-neutral-200 text-neutral-950 font-semibold px-6 py-3 rounded-xl transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none cursor-pointer flex items-center justify-center space-x-2"
+                  >
+                    {isResearching ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 text-neutral-950" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        <span>Researching...</span>
+                      </>
+                    ) : (
+                      <span>Search</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </form>
+
+            {/* Render errors if any */}
+            {researchError && (
+              <div className="p-4 bg-rose-950/40 border border-rose-900/60 rounded-xl text-rose-300 text-sm leading-normal">
+                <strong>Error:</strong> {researchError}
+              </div>
+            )}
+
+            {/* Agent results viewport */}
+            {(isResearching || answer || sources.length > 0) && (
+              <div className="border-t border-neutral-850 pt-6 space-y-6">
+                
+                {/* Loader skeleton */}
+                {isResearching && (
+                  <div className="space-y-4 animate-pulse">
+                    <div className="h-4 bg-neutral-850 rounded w-1/3" />
+                    <div className="space-y-2">
+                      <div className="h-3.5 bg-neutral-850 rounded w-full" />
+                      <div className="h-3.5 bg-neutral-850 rounded w-5/6" />
+                      <div className="h-3.5 bg-neutral-850 rounded w-2/3" />
+                    </div>
+                  </div>
+                )}
+
+                {/* Final synthesized answer */}
+                {answer && (
+                  <div className="space-y-3">
+                    <h3 className="text-sm font-semibold uppercase text-neutral-400 tracking-wider">Research Answer</h3>
+                    <div className="bg-neutral-950 border border-neutral-900 p-5 rounded-xl text-neutral-200 text-sm leading-relaxed whitespace-pre-wrap">
+                      {answer}
+                    </div>
+                  </div>
+                )}
+
+                {/* Sources list */}
+                {sources.length > 0 && (
+                  <div className="space-y-3">
+                    <h3 className="text-sm font-semibold uppercase text-neutral-400 tracking-wider">Sources Cited</h3>
+                    <ul className="space-y-2">
+                      {sources.map((src, idx) => (
+                        <li key={idx} className="flex items-center space-x-2">
+                          <span className="text-2xs text-purple-400 bg-purple-950/45 px-2 py-0.5 border border-purple-900/50 rounded font-mono">
+                            [{idx + 1}]
+                          </span>
+                          <a
+                            href={src}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-neutral-400 hover:text-purple-400 hover:underline break-all transition-colors"
+                          >
+                            {src}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
       </main>
 
-      {/* Footer */}
+      {/* Page Footer */}
       <footer className="border-t border-neutral-900 bg-neutral-950 py-6 text-center text-xs text-neutral-600">
         <p>© 2026 Antigravity Research Assistant Monorepo. All rights reserved.</p>
       </footer>
