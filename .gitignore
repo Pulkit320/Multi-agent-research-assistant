@@ -1,0 +1,15 @@
+# Python virtual environments & caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node dependencies and build files
+node_modules/
+dist/
+.env.local
+npm-debug.log*
+
+# System files
+.DS_Store
