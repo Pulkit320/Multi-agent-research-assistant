@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from app.agents.research_agent import ResearchAgent
+from typing import List
+from app.graph import graph
 
 # Initialize router for research operations.
 # Separating research routes from other domains keeps our api structure modular.
@@ -15,23 +16,35 @@ class ResearchRequest(BaseModel):
 class ResearchResponse(BaseModel):
     """
     Validation schema for outgoing research responses.
+    
+    Now includes the generated plan (sub-questions) so that the client
+    can visualize the planning phase.
     """
+    plan: List[str] = Field(default=[], description="The list of sub-questions generated in the planning phase.")
     answer: str = Field(..., description="The synthesized answer from the agent.")
-    sources: list[str] = Field(default_list=[], description="A list of URLs cited during research.")
+    sources: List[str] = Field(default=[], description="A list of URLs cited during research.")
 
 @router.post("/research", response_model=ResearchResponse)
 async def run_research(request: ResearchRequest):
     """
-    Endpoint to trigger the ResearchAgent flow.
+    Endpoint to trigger the LangGraph Research workflow.
     
-    This handles HTTP request parsing, runs the async LLM + Search loop,
-    and formats the finalized answer and source URLs.
+    This handles HTTP request parsing, runs the planner and research nodes,
+    and returns the plan, finalized answer, and source URLs.
     """
     try:
-        agent = ResearchAgent()
-        result = await agent.run(request.query)
+        # Initialize graph state
+        initial_state = {
+            "original_query": request.query
+        }
+        
+        # Invoke the LangGraph compiled state graph.
+        # Since our node functions are asynchronous, we call ainvoke.
+        result = await graph.ainvoke(initial_state)
+        
         return ResearchResponse(
-            answer=result.get("answer", ""),
+            plan=result.get("plan", []),
+            answer=result.get("final_answer", ""),
             sources=result.get("sources", [])
         )
     except ValueError as val_error:
