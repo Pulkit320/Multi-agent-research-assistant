@@ -4,6 +4,7 @@ pydantic-settings
 python-dotenv
 httpx
 langgraph
+langgraph-checkpoint-sqlite
 pdfplumber
 psycopg2-binary
 python-multipart

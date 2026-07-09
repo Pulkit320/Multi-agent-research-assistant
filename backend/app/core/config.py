@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     database_url: str = ""
 
+    # Path for SQLite file used by LangGraph's checkpoint saver.
+    # All graph states (including paused human-review sessions) persist here.
+    sqlite_db_path: str = "checkpoints.db"
+
     # Model Configurations (centralized as per code style guidelines)
     gemini_model: str = "gemma-4-31b-it"
     openrouter_model: str = "google/gemini-2.5-flash"
