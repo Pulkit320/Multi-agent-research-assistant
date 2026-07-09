@@ -22,7 +22,8 @@ class ResearchResponse(BaseModel):
     """
     plan: List[str] = Field(default=[], description="The list of sub-questions generated in the planning phase.")
     evidence: List[Dict[str, Any]] = Field(default=[], description="The consolidated list of evidence items compiled by the Analyst.")
-    answer: str = Field(..., description="The synthesized answer from the agent.")
+    answer: str = Field(default="", description="Deprecated: Synthesized plain text answer.")
+    final_report: str = Field(..., description="The compiled research report in markdown format.")
     sources: List[str] = Field(default=[], description="A list of URLs cited during research.")
 
 @router.post("/research", response_model=ResearchResponse)
@@ -46,7 +47,8 @@ async def run_research(request: ResearchRequest):
         return ResearchResponse(
             plan=result.get("plan", []),
             evidence=result.get("evidence", []),
-            answer=result.get("final_answer", ""),
+            answer="",
+            final_report=result.get("final_report", ""),
             sources=result.get("sources", [])
         )
     except ValueError as val_error:

@@ -61,9 +61,12 @@ class AnalystAgent:
         # Format inputs for LLM prompt
         web_context = ""
         for idx, res in enumerate(research_results):
+            answer_text = res.get('answer', '')
+            sources_list = res.get('sources', [])
+            sources_str = ', '.join(sources_list) if sources_list else "Web (direct answer — no URL returned)"
             web_context += f"- Sub-Question: {res.get('sub_question', '')}\n"
-            web_context += f"  Web Answer: {res.get('answer', '')}\n"
-            web_context += f"  Web Sources: {', '.join(res.get('sources', []))}\n\n"
+            web_context += f"  Web Answer: {answer_text}\n"
+            web_context += f"  Web Sources: {sources_str}\n\n"
 
         doc_context = ""
         for idx, res in enumerate(document_results):
@@ -79,7 +82,9 @@ class AnalystAgent:
             f"Original User Query: {query}\n\n"
             f"=== WEB SEARCH FINDINGS ===\n{web_context}\n"
             f"=== DOCUMENT SEARCH FINDINGS ===\n{doc_context}\n"
-            f"Compile and deduplicate these into a structured list of evidence items."
+            f"Compile and deduplicate these into a structured list of evidence items.\n"
+            f"IMPORTANT: Even if a web source shows 'Web (direct answer — no URL returned)', "
+            f"you must still include the claim in the evidence list using that phrase as the source value."
         )
 
         if settings.gemini_api_key:
@@ -134,7 +139,15 @@ class AnalystAgent:
             if not candidates:
                 return []
 
-            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            # Find the actual response part (avoiding reasoning thoughts)
+            parts = candidates[0].get("content", {}).get("parts", [])
+            raw_text = ""
+            for part in reversed(parts):
+                if "text" in part and not part.get("thought"):
+                    raw_text = part["text"]
+                    break
+            if not raw_text and parts:
+                raw_text = parts[-1].get("text", "")
             try:
                 parsed = json.loads(raw_text)
                 return parsed.get("evidence", [])

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     database_url: str = ""
 
     # Model Configurations (centralized as per code style guidelines)
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemma-4-31b-it"
     openrouter_model: str = "google/gemini-2.5-flash"
 
     # Model Configuration to read from .env file

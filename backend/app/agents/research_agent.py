@@ -22,15 +22,20 @@ class ResearchAgent:
                 "No LLM provider configured. Please set GEMINI_API_KEY or OPENROUTER_API_KEY."
             )
         
+        # We always force a web search for factual questions to guarantee that
+        # the AnalystAgent receives URL citations. Without URLs, the Analyst returns
+        # an empty evidence list and the final report says "no information found".
         self.system_prompt = (
             "You are a highly capable research assistant. "
-            "Your task is to answer user queries with up-to-date and accurate information. "
+            "Your task is to answer user queries with up-to-date, cited, accurate information. "
             "You have access to a tool named `web_search` which searches the internet. "
-            "If the user query asks about current events, statistics, or facts that might "
-            "require up-to-date knowledge, you MUST call the `web_search` tool. "
-            "If the query is a general knowledge question that does not require fresh search, "
-            "or a creative request, you should answer it directly without calling `web_search`. "
-            "After retrieving search results, synthesize a final answer citing or referencing the facts."
+            "You MUST ALWAYS call the `web_search` tool for ANY factual question — "
+            "including well-known facts like capital cities, populations, historical events, "
+            "scientific data, and current statistics. "
+            "Even if you already know the answer, call `web_search` anyway so the response "
+            "includes verified source URLs that can be cited in the research report. "
+            "Only skip `web_search` for purely creative or conversational requests (e.g. write a poem). "
+            "After retrieving search results, synthesize a final answer citing the sources."
         )
 
     async def run(self, query: str) -> dict:
@@ -91,9 +96,12 @@ class ResearchAgent:
                 "parts": [{"text": self.system_prompt}]
             },
             "tools": gemini_tools,
+            # mode: ANY forces the model to call at least one tool on this first turn,
+            # guaranteeing that web_search is invoked and source URLs are returned.
+            # The second turn uses no toolConfig (defaulting to AUTO) to get the text answer.
             "toolConfig": {
                 "functionCallingConfig": {
-                    "mode": "AUTO"
+                    "mode": "ANY"
                 }
             }
         }
@@ -119,8 +127,14 @@ class ResearchAgent:
                     break
 
             if not function_call:
-                # No function call required; return direct answer
-                direct_text = parts[0].get("text", "")
+                # No function call required; return direct answer (avoiding reasoning thoughts)
+                direct_text = ""
+                for part in reversed(parts):
+                    if "text" in part and not part.get("thought"):
+                        direct_text = part["text"]
+                        break
+                if not direct_text and parts:
+                    direct_text = parts[-1].get("text", "")
                 return {"answer": direct_text, "sources": []}
 
             # If we reached here, the model requested `web_search`
@@ -136,11 +150,8 @@ class ResearchAgent:
 
             # Construct the conversation history for the second turn:
             # Turn 1: User's original prompt (already in contents[0])
-            # Turn 2: Model's function call request
-            contents.append({
-                "role": "model",
-                "parts": [{"functionCall": function_call}]
-            })
+            # Turn 2: Model's function call request (re-using the exact model content to preserve thought_signature)
+            contents.append(content)
             # Turn 3: Tool response
             contents.append({
                 "role": "tool",
@@ -169,7 +180,15 @@ class ResearchAgent:
             if not second_candidates:
                 return {"answer": "Error generating final answer.", "sources": urls}
 
-            final_text = second_candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            # Find the actual response part (avoiding reasoning thoughts)
+            second_parts = second_candidates[0].get("content", {}).get("parts", [])
+            final_text = ""
+            for part in reversed(second_parts):
+                if "text" in part and not part.get("thought"):
+                    final_text = part["text"]
+                    break
+            if not final_text and second_parts:
+                final_text = second_parts[-1].get("text", "")
             return {"answer": final_text, "sources": urls}
 
     async def _run_openrouter(self, query: str) -> dict:

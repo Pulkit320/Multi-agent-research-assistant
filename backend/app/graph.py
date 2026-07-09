@@ -1,13 +1,12 @@
-import httpx
 import logging
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
-from app.core.config import settings
 from app.agents.planner_agent import PlannerAgent
 from app.agents.research_agent import ResearchAgent
 from app.agents.document_agent import DocumentAgent
 from app.agents.analyst_agent import AnalystAgent
+from app.agents.writer_agent import WriterAgent
 
 logger = logging.getLogger(__name__)
 
@@ -15,15 +14,14 @@ class GraphState(BaseModel):
     """
     GraphState represents the shared memory schema of the LangGraph workflow.
     
-    Now expanded in Phase 3 to support document RAG search results and a combined
-    evidence list synthesized by the Analyst.
+    Now expanded in Phase 4 to include final_report (compiled markdown report).
     """
     original_query: str = ""
     plan: List[str] = Field(default_factory=list)
     research_results: List[Dict[str, Any]] = Field(default_factory=list)
     document_results: List[Dict[str, Any]] = Field(default_factory=list)
     evidence: List[Dict[str, Any]] = Field(default_factory=list)
-    final_answer: str = ""
+    final_report: str = ""
     sources: List[str] = Field(default_factory=list)
 
 async def planner_node(state: GraphState) -> Dict[str, Any]:
@@ -82,8 +80,7 @@ async def combine_node(state: GraphState) -> Dict[str, Any]:
     Combine node in the graph.
     
     This acts as the merge/fan-in point after parallel execution branches finish.
-    1. Invokes AnalystAgent to clean, deduplicate, and compile evidence.
-    2. Invokes LLM to synthesize the final comparative answer from the evidence.
+    Invokes AnalystAgent to clean, deduplicate, and compile evidence.
     """
     # 1. Deduplicate and merge claims using AnalystAgent
     analyst = AnalystAgent()
@@ -93,95 +90,28 @@ async def combine_node(state: GraphState) -> Dict[str, Any]:
         document_results=state.document_results
     )
 
-    # 2. Extract sources and compile prompt context
-    unique_sources = set()
-    synthesis_evidence_context = ""
-    
-    for idx, item in enumerate(evidence_list):
-        claim = item.get("claim", "")
-        source_type = item.get("source_type", "")
-        source = item.get("source", "")
-        
-        synthesis_evidence_context += f"[{idx+1}] [{source_type.upper()}] (Source: {source}): {claim}\n"
-        unique_sources.add(source)
-
-    # 3. Formulate the final synthesis prompt
-    synthesis_prompt = (
-        f"You are a research synthesis agent. Your job is to take the original user query, "
-        f"read the consolidated evidence items compiled by our analyst, and write a single, "
-        f"comprehensive, and coherent final response answering the original query.\n\n"
-        f"Original Query: {state.original_query}\n\n"
-        f"Consolidated Evidence Findings:\n{synthesis_evidence_context}\n"
-        f"Generate the final unified answer now. Ensure you reference the bracketed citation numbers "
-        f"(e.g., [1], [2]) where facts are mentioned."
-    )
-
-    # 4. Request LLM synthesis
-    final_answer = ""
-    if settings.gemini_api_key:
-        final_answer = await _synthesize_gemini(synthesis_prompt)
-    else:
-        final_answer = await _synthesize_openrouter(synthesis_prompt)
+    # 2. Compile list of unique source citations
+    unique_sources = list({item.get("source", "") for item in evidence_list if item.get("source")})
 
     return {
         "evidence": evidence_list,
-        "final_answer": final_answer,
-        "sources": list(unique_sources)
+        "sources": unique_sources
     }
 
-async def _synthesize_gemini(prompt: str) -> str:
+async def writer_node(state: GraphState) -> Dict[str, Any]:
     """
-    Direct REST call to Gemini to synthesize the final answer.
+    Writer node in the graph.
+    
+    Invokes the WriterAgent to compile the final report in Markdown.
     """
-    api_key = settings.gemini_api_key
-    model = settings.gemini_model
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-
-    payload = {
-        "contents": [
-            {"role": "user", "parts": [{"text": prompt}]}
-        ]
+    writer = WriterAgent()
+    report_md = await writer.write(
+        query=state.original_query,
+        evidence=state.evidence
+    )
+    return {
+        "final_report": report_md
     }
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        response_json = response.json()
-        candidates = response_json.get("candidates", [])
-        if candidates:
-            return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        return "Failed to synthesize final answer."
-
-async def _synthesize_openrouter(prompt: str) -> str:
-    """
-    Direct REST call to OpenRouter to synthesize the final answer.
-    """
-    api_key = settings.openrouter_api_key
-    model = settings.openrouter_model
-    url = "https://openrouter.ai/api/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
-
-    payload = {
-        "model": model,
-        "messages": messages
-    }
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        response_json = response.json()
-        choices = response_json.get("choices", [])
-        if choices:
-            return choices[0].get("message", {}).get("content", "")
-        return "Failed to synthesize final answer."
 
 # Assemble and compile the parallel LangGraph workflow.
 workflow = StateGraph(GraphState)
@@ -190,6 +120,7 @@ workflow.add_node("planner", planner_node)
 workflow.add_node("research", research_node)
 workflow.add_node("document", document_node)
 workflow.add_node("combine", combine_node)
+workflow.add_node("writer", writer_node)
 
 # Set parallel execution layout
 workflow.add_edge(START, "planner")
@@ -202,6 +133,10 @@ workflow.add_edge("planner", "document")
 workflow.add_edge("research", "combine")
 workflow.add_edge("document", "combine")
 
-workflow.add_edge("combine", END)
+# Route merge results into report compiler agent
+workflow.add_edge("combine", "writer")
+
+# Terminate at END after report writing completes
+workflow.add_edge("writer", END)
 
 graph = workflow.compile()

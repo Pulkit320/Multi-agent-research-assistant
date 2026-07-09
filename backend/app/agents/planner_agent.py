@@ -105,7 +105,14 @@ class PlannerAgent:
             if not parts:
                 return [query]
 
-            raw_text = parts[0].get("text", "")
+            # Find the actual response part (avoiding reasoning thoughts)
+            raw_text = ""
+            for part in reversed(parts):
+                if "text" in part and not part.get("thought"):
+                    raw_text = part["text"]
+                    break
+            if not raw_text:
+                raw_text = parts[-1].get("text", "")
             try:
                 parsed = json.loads(raw_text)
                 sub_questions = parsed.get("sub_questions", [])
