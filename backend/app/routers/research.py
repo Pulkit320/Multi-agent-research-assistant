@@ -1,93 +1,179 @@
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+import asyncio
+import json
 from uuid import uuid4
-from langgraph.errors import GraphInterrupt
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from typing import Optional
+from langgraph.types import Command
+from app.core.sse_manager import sse_manager
 
-# Initialize router for research operations.
-# Separating research routes from other domains keeps our api structure modular.
+# first example of SSE stream in this codebase
+#
+# This router registers GET /research/stream, which provides real-time updates
+# on graph execution states. We transitioned to a streaming design to prevent
+# frontend timeouts during long-running agent workflows (which can take 30+ seconds).
 router = APIRouter()
 
 
-class ResearchRequest(BaseModel):
+def format_sse(event: str, data: dict) -> str:
     """
-    Validation schema for incoming research requests.
+    Formats the payload as a standard Server-Sent Event (SSE) message.
+    Requires a double newline at the end to flush the event to the browser.
     """
-    query: str = Field(..., description="The query to research.")
+    payload = {"event": event, **data}
+    return f"data: {json.dumps(payload)}\n\n"
 
 
-class ResearchResponse(BaseModel):
+@router.get("/research/stream")
+async def stream_research(query: str, request: Request, report_id: Optional[str] = None):
     """
-    Validation schema for outgoing research responses.
+    GET endpoint that yields a Server-Sent Events (SSE) stream of the research graph execution.
 
-    Phase 5 adds:
-      - report_id: the UUID that identifies this session in the SQLite checkpoint.
-        The client uses this to call /report/{id}/approve or /report/{id}/reject.
-      - review_verdict: the structured output from ReviewerAgent.
-      - human_decision: None until a human acts; "approved" or "rejected" after.
+    Why GET: SSE protocol natively requires GET requests.
+    If report_id is provided, the handler tries to reconnect to an existing session.
+    Otherwise, it initiates a new research graph execution.
     """
-    report_id: str = Field(..., description="UUID identifying this checkpoint session.")
-    plan: List[str] = Field(default=[], description="Sub-questions from the Planner.")
-    evidence: List[Dict[str, Any]] = Field(default=[], description="Structured evidence from the Analyst.")
-    review_verdict: Dict[str, Any] = Field(default={}, description="Reviewer's verdict: {approved, issues}.")
-    human_decision: Optional[str] = Field(default=None, description="'approved', 'rejected', or null.")
-    final_report: str = Field(default="", description="Compiled Markdown report from the Writer.")
-    sources: List[str] = Field(default=[], description="Unique source URLs cited.")
-
-
-@router.post("/research", response_model=ResearchResponse)
-async def run_research(request_body: ResearchRequest, request: Request):
-    """
-    Endpoint to trigger the LangGraph Research + Review workflow.
-
-    Generates a unique report_id (used as the LangGraph thread_id), invokes the
-    graph, and handles the GraphInterrupt that fires when the graph pauses at the
-    human_review node. Returns all state collected up to that pause point plus
-    the report_id so the frontend can call the approve/reject endpoints.
-    """
-    # Generate a unique ID for this research session.
-    # This is the LangGraph thread_id used to checkpoint and resume the graph.
-    report_id = str(uuid4())
-
-    initial_state = {
-        "original_query": request_body.query,
-        "report_id": report_id,
-    }
-
-    # Thread config binds this invocation to its specific SQLite checkpoint entry.
-    thread_config = {"configurable": {"thread_id": report_id}}
-
-    # graph is compiled at startup in main.py and attached to app.state
     graph = request.app.state.graph
 
-    try:
-        # The graph will run through planner -> research/document -> combine ->
-        # writer -> reviewer -> human_review, where it calls interrupt() and pauses.
-        # ainvoke() raises GraphInterrupt at that pause point.
-        await graph.ainvoke(initial_state, config=thread_config)
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
-        # If we reach here the graph completed without interruption (shouldn't happen
-        # in normal flow, but handle it gracefully just in case).
-        snapshot = await graph.aget_state(thread_config)
-        state_values = snapshot.values
+    async def event_generator():
+        # 1. Establish the session ID (report_id) and register with sse_manager
+        nonlocal report_id
+        if not report_id:
+            report_id = str(uuid4())
 
-    except GraphInterrupt:
-        # Normal expected path: graph paused at human_review_node.
-        # Fetch the checkpointed state to build the response.
-        snapshot = await graph.aget_state(thread_config)
-        state_values = snapshot.values
+        # Register sync event immediately so other threads can notify this stream
+        sync_event = sse_manager.register(report_id)
 
-    except ValueError as val_error:
-        raise HTTPException(status_code=400, detail=str(val_error))
-    except Exception as err:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {err}")
+        try:
+            # Emit the start event immediately so the client learns the report_id
+            yield format_sse("start", {"report_id": report_id})
 
-    return ResearchResponse(
-        report_id=report_id,
-        plan=state_values.get("plan", []),
-        evidence=state_values.get("evidence", []),
-        review_verdict=state_values.get("review_verdict", {}),
-        human_decision=state_values.get("human_decision"),
-        final_report=state_values.get("final_report", ""),
-        sources=state_values.get("sources", [])
-    )
+            # 2. Setup the graph execution config
+            thread_config = {"configurable": {"thread_id": report_id}}
+            initial_state = {
+                "original_query": query.strip(),
+                "report_id": report_id,
+            }
+
+            # 3. Stream the graph execution using LangGraph's astream() under 'tasks' mode.
+            # stream_mode='tasks' yields detailed start/finish snapshots for each node.
+            async for chunk in graph.astream(initial_state, config=thread_config, stream_mode="tasks"):
+                node_name = chunk.get("name", "")
+
+                # Skip execution logging for START, END, or system steps
+                if node_name in ("__start__", "__end__"):
+                    continue
+
+                # Check if this chunk is a node START or FINISH event
+                if "result" in chunk or "error" in chunk:
+                    # Node has finished. Extract any updated state fields for the frontend.
+                    res_val = chunk.get("result") or {}
+                    
+                    data_payload = {}
+                    if node_name == "planner":
+                        data_payload["plan"] = res_val.get("plan", [])
+                    elif node_name == "combine":
+                        data_payload["evidence"] = res_val.get("evidence", [])
+                        data_payload["sources"] = res_val.get("sources", [])
+                    elif node_name == "writer":
+                        data_payload["final_report"] = res_val.get("final_report", "")
+                    elif node_name == "reviewer":
+                        data_payload["review_verdict"] = res_val.get("review_verdict", {})
+
+                    # Extract accumulated cost and tokens from snapshot at this step
+                    snap = await graph.aget_state(thread_config)
+                    data_payload["accumulated_tokens_input"] = snap.values.get("accumulated_tokens_input", 0)
+                    data_payload["accumulated_tokens_output"] = snap.values.get("accumulated_tokens_output", 0)
+                    data_payload["accumulated_cost_usd"] = snap.values.get("accumulated_cost_usd", 0.0)
+
+                    yield format_sse("node_finish", {
+                        "node": node_name,
+                        "status": f"Completed: {node_name}",
+                        "data": data_payload
+                    })
+                else:
+                    # Node has started
+                    yield format_sse("node_start", {
+                        "node": node_name,
+                        "status": f"Running: {node_name}"
+                    })
+
+            # 4. Check if the graph is currently paused at the human_review node
+            state_snapshot = await graph.aget_state(thread_config)
+            
+            # If the next node in the graph queue is 'human_review', we have hit the interrupt.
+            # We emit 'paused' and sleep until the human acts.
+            if "human_review" in state_snapshot.next:
+                # Retrieve the review verdict from the state values
+                verdict = state_snapshot.values.get("review_verdict", {})
+                yield format_sse("paused", {
+                    "node": "human_review",
+                    "status": "Awaiting human approval...",
+                    "data": {"review_verdict": verdict}
+                })
+
+                # Await the click event from POST /report/{id}/approve or reject
+                await sync_event.wait()
+
+                # 5. Retrieve decision from manager and resume graph execution
+                decision = sse_manager.get_decision(report_id)
+                yield format_sse("node_start", {
+                    "node": "human_review",
+                    "status": f"Resuming: human_review with decision '{decision}'"
+                })
+
+                # Resume the graph. Command(resume=decision) triggers human_review_node to finish.
+                async for chunk in graph.astream(
+                    Command(resume=decision),
+                    config=thread_config,
+                    stream_mode="tasks"
+                ):
+                    node_name = chunk.get("name", "")
+                    if node_name == "human_review" and ("result" in chunk or "error" in chunk):
+                        # human_review completed
+                        yield format_sse("node_finish", {
+                            "node": "human_review",
+                            "status": "Human review completed",
+                            "data": {"human_decision": decision}
+                        })
+
+                # Re-fetch state values after resumption to get final report and citations
+                final_snapshot = await graph.aget_state(thread_config)
+                final_vals = final_snapshot.values
+
+                yield format_sse("done", {
+                    "status": f"Research complete. Decision: {decision}",
+                    "data": {
+                        "human_decision": decision,
+                        "final_report": final_vals.get("final_report", ""),
+                        "sources": final_vals.get("sources", []),
+                        "accumulated_tokens_input": final_vals.get("accumulated_tokens_input", 0),
+                        "accumulated_tokens_output": final_vals.get("accumulated_tokens_output", 0),
+                        "accumulated_cost_usd": final_vals.get("accumulated_cost_usd", 0.0)
+                    }
+                })
+            else:
+                # Graph completed normally without hitting human review pause
+                yield format_sse("done", {
+                    "status": "Research complete.",
+                    "data": {
+                        "human_decision": "approved",
+                        "final_report": state_snapshot.values.get("final_report", ""),
+                        "sources": state_snapshot.values.get("sources", []),
+                        "accumulated_tokens_input": state_snapshot.values.get("accumulated_tokens_input", 0),
+                        "accumulated_tokens_output": state_snapshot.values.get("accumulated_tokens_output", 0),
+                        "accumulated_cost_usd": state_snapshot.values.get("accumulated_cost_usd", 0.0)
+                    }
+                })
+
+        except Exception as stream_err:
+            print(f"Error in SSE event generator: {stream_err}")
+            yield format_sse("error", {"status": f"Streaming error: {stream_err}"})
+        finally:
+            # Clean up memory references for this session
+            sse_manager.cleanup(report_id)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

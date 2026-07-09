@@ -43,16 +43,19 @@ class WriterAgent:
             "- Return ONLY the raw markdown text of the report. Do not wrap it in ```markdown code blocks."
         )
 
-    async def write(self, query: str, evidence: List[Dict[str, Any]]) -> str:
+    async def write(self, query: str, evidence: List[Dict[str, Any]]) -> dict:
         """
-        Generates the final markdown report based on evidence items.
+        Generates the final markdown report based on evidence items and tracks token usage.
         
         Args:
             query: The original research query.
             evidence: The list of consolidated evidence items from the Analyst.
             
         Returns:
-            The markdown report string.
+            A dict containing:
+              - 'final_report': str (markdown report text)
+              - 'input_tokens': int
+              - 'output_tokens': int
         """
         logger.info(f"WriterAgent compiling report for query: '{query}'")
         
@@ -70,18 +73,14 @@ class WriterAgent:
             f"Compile the final report in Markdown format."
         )
 
-        try:
-            if settings.gemini_api_key:
-                return await self._write_gemini(prompt)
-            else:
-                return await self._write_openrouter(prompt)
-        except Exception as e:
-            logger.error(f"WriterAgent failed: {e}")
-            return f"# Error Generating Report\n\nFailed to compile response: {str(e)}"
+        if settings.gemini_api_key:
+            return await self._write_gemini(prompt)
+        else:
+            return await self._write_openrouter(prompt)
 
-    async def _write_gemini(self, prompt: str) -> str:
+    async def _write_gemini(self, prompt: str) -> dict:
         """
-        Queries Gemini API directly via HTTP request.
+        Queries Gemini API directly and extracts token usage.
         """
         api_key = settings.gemini_api_key
         model = settings.gemini_model
@@ -96,11 +95,18 @@ class WriterAgent:
             }
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             response_json = response.json()
             
+            usage = response_json.get("usageMetadata", {})
+            input_tokens = usage.get("promptTokenCount", 0)
+            output_tokens = usage.get("candidatesTokenCount", 0)
+
             candidates = response_json.get("candidates", [])
             if candidates:
                 # Find the actual response part (avoiding reasoning thoughts)
@@ -112,12 +118,12 @@ class WriterAgent:
                         break
                 if not raw_text and parts:
                     raw_text = parts[-1].get("text", "")
-                return raw_text
-            return "No report generated."
+                return {"final_report": raw_text, "input_tokens": input_tokens, "output_tokens": output_tokens}
+            return {"final_report": "No report generated.", "input_tokens": input_tokens, "output_tokens": output_tokens}
 
-    async def _write_openrouter(self, prompt: str) -> str:
+    async def _write_openrouter(self, prompt: str) -> dict:
         """
-        Queries OpenRouter API directly via HTTP request.
+        Queries OpenRouter API directly and extracts token usage.
         """
         api_key = settings.openrouter_api_key
         model = settings.openrouter_model
@@ -138,12 +144,19 @@ class WriterAgent:
             "messages": messages
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             response_json = response.json()
             
+            usage = response_json.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+
             choices = response_json.get("choices", [])
             if choices:
-                return choices[0].get("message", {}).get("content", "")
-            return "No report generated."
+                return {"final_report": choices[0].get("message", {}).get("content", ""), "input_tokens": input_tokens, "output_tokens": output_tokens}
+            return {"final_report": "No report generated.", "input_tokens": input_tokens, "output_tokens": output_tokens}

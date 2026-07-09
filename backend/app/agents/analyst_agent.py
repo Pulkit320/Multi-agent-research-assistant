@@ -92,9 +92,9 @@ class AnalystAgent:
         else:
             return await self._analyze_openrouter(prompt)
 
-    async def _analyze_gemini(self, prompt: str) -> List[Dict[str, Any]]:
+    async def _analyze_gemini(self, prompt: str) -> dict:
         """
-        Calls Gemini to get structured evidence list.
+        Calls Gemini to get structured evidence list and tracks token usage.
         """
         api_key = settings.gemini_api_key
         model = settings.gemini_model
@@ -130,14 +130,21 @@ class AnalystAgent:
             }
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             response_json = response.json()
 
+            usage = response_json.get("usageMetadata", {})
+            input_tokens = usage.get("promptTokenCount", 0)
+            output_tokens = usage.get("candidatesTokenCount", 0)
+
             candidates = response_json.get("candidates", [])
             if not candidates:
-                return []
+                return {"evidence": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             # Find the actual response part (avoiding reasoning thoughts)
             parts = candidates[0].get("content", {}).get("parts", [])
@@ -150,13 +157,13 @@ class AnalystAgent:
                 raw_text = parts[-1].get("text", "")
             try:
                 parsed = json.loads(raw_text)
-                return parsed.get("evidence", [])
+                return {"evidence": parsed.get("evidence", []), "input_tokens": input_tokens, "output_tokens": output_tokens}
             except (json.JSONDecodeError, TypeError):
-                return []
+                return {"evidence": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
-    async def _analyze_openrouter(self, prompt: str) -> List[Dict[str, Any]]:
+    async def _analyze_openrouter(self, prompt: str) -> dict:
         """
-        Calls OpenRouter to get structured evidence list.
+        Calls OpenRouter to get structured evidence list and tracks token usage.
         """
         api_key = settings.openrouter_api_key
         model = settings.openrouter_model
@@ -178,18 +185,25 @@ class AnalystAgent:
             "response_format": {"type": "json_object"}
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             response_json = response.json()
 
+            usage = response_json.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+
             choices = response_json.get("choices", [])
             if not choices:
-                return []
+                return {"evidence": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             raw_text = choices[0].get("message", {}).get("content", "")
             try:
                 parsed = json.loads(raw_text)
-                return parsed.get("evidence", [])
+                return {"evidence": parsed.get("evidence", []), "input_tokens": input_tokens, "output_tokens": output_tokens}
             except (json.JSONDecodeError, TypeError):
-                return []
+                return {"evidence": [], "input_tokens": input_tokens, "output_tokens": output_tokens}

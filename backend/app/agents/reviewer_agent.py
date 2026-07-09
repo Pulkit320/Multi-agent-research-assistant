@@ -51,7 +51,7 @@ class ReviewerAgent:
         final_report: str,
     ) -> Dict[str, Any]:
         """
-        Audits the final report against the plan and evidence.
+        Audits the final report against the plan and evidence, and tracks token usage.
 
         Args:
             query: The original user query.
@@ -60,9 +60,8 @@ class ReviewerAgent:
             final_report: The Markdown report from the WriterAgent.
 
         Returns:
-            A dict: {approved: bool, issues: list[str]}.
-            On any LLM error, defaults to approved=True with an empty issues list
-            so a transient failure does not permanently block the pipeline.
+            A dict: {approved: bool, issues: list[str], input_tokens: int, output_tokens: int}.
+            On any LLM error, defaults to approved=True with an empty issues list.
         """
         plan_text = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(plan))
         evidence_text = "\n".join(
@@ -88,8 +87,7 @@ class ReviewerAgent:
 
     async def _review_gemini(self, prompt: str) -> Dict[str, Any]:
         """
-        Calls Gemini with a structured JSON schema to get the review verdict.
-        Uses the same responseMimeType + responseSchema pattern as AnalystAgent.
+        Calls Gemini with a structured JSON schema to get the review verdict and token usage.
         """
         api_key = settings.gemini_api_key
         model = settings.gemini_model
@@ -125,15 +123,23 @@ class ReviewerAgent:
             }
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 response_json = response.json()
 
+            # Record token usage from Gemini format
+            usage = response_json.get("usageMetadata", {})
+            input_tokens = usage.get("promptTokenCount", 0)
+            output_tokens = usage.get("candidatesTokenCount", 0)
+
             candidates = response_json.get("candidates", [])
             if not candidates:
-                return {"approved": True, "issues": []}
+                return {"approved": True, "issues": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             # Find the actual response part, skipping reasoning thought blocks.
             parts = candidates[0].get("content", {}).get("parts", [])
@@ -148,16 +154,18 @@ class ReviewerAgent:
             parsed = json.loads(raw_text)
             return {
                 "approved": parsed.get("approved", True),
-                "issues": parsed.get("issues", [])
+                "issues": parsed.get("issues", []),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens
             }
         except (json.JSONDecodeError, TypeError, httpx.HTTPError) as err:
             # On any transient error, default to approved so the pipeline isn't blocked.
             print(f"ReviewerAgent failed (defaulting to approved): {err}")
-            return {"approved": True, "issues": []}
+            return {"approved": True, "issues": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
     async def _review_openrouter(self, prompt: str) -> Dict[str, Any]:
         """
-        Calls OpenRouter to get the structured review verdict.
+        Calls OpenRouter to get the structured review verdict and token usage.
         """
         api_key = settings.openrouter_api_key
         model = settings.openrouter_model
@@ -177,22 +185,32 @@ class ReviewerAgent:
             "response_format": {"type": "json_object"}
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 response_json = response.json()
 
+            # Record token usage from OpenRouter format
+            usage = response_json.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+
             choices = response_json.get("choices", [])
             if not choices:
-                return {"approved": True, "issues": []}
+                return {"approved": True, "issues": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             raw_text = choices[0].get("message", {}).get("content", "")
             parsed = json.loads(raw_text)
             return {
                 "approved": parsed.get("approved", True),
-                "issues": parsed.get("issues", [])
+                "issues": parsed.get("issues", []),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens
             }
         except (json.JSONDecodeError, TypeError, httpx.HTTPError) as err:
             print(f"ReviewerAgent failed (defaulting to approved): {err}")
-            return {"approved": True, "issues": []}
+            return {"approved": True, "issues": [], "input_tokens": input_tokens, "output_tokens": output_tokens}

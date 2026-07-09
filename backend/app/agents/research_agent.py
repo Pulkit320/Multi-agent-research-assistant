@@ -42,16 +42,16 @@ class ResearchAgent:
         """
         Runs the research agent flow for a user query.
         
-        This is the main entry point for the agent logic, containing the LLM-tool execution loop.
-        
         Args:
             query: The user's query string.
             
         Returns:
-            A dictionary with keys 'answer' (the text answer) and 'sources' (a list of URLs).
+            A dict containing:
+              - 'answer': str
+              - 'sources': List[str]
+              - 'input_tokens': int
+              - 'output_tokens': int
         """
-        sources = []
-
         if settings.gemini_api_key:
             return await self._run_gemini(query)
         else:
@@ -59,9 +59,7 @@ class ResearchAgent:
 
     async def _run_gemini(self, query: str) -> dict:
         """
-        Orchestrates the tool-calling loop using Google's direct Gemini REST API.
-        
-        This exists to provide a native, dependency-free implementation for Gemini integration.
+        Orchestrates the tool-calling loop using Google's direct Gemini REST API and tracks token usage.
         """
         api_key = settings.gemini_api_key
         model = settings.gemini_model
@@ -106,15 +104,23 @@ class ResearchAgent:
             }
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # First turn: Ask the model if it needs the search tool
             response = await client.post(url, json=payload)
             response.raise_for_status()
             response_json = response.json()
 
+            # Record usage of first turn
+            usage_1 = response_json.get("usageMetadata", {})
+            input_tokens += usage_1.get("promptTokenCount", 0)
+            output_tokens += usage_1.get("candidatesTokenCount", 0)
+
             candidates = response_json.get("candidates", [])
             if not candidates:
-                return {"answer": "No answer returned from Gemini.", "sources": []}
+                return {"answer": "No answer returned from Gemini.", "sources": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             content = candidates[0].get("content", {})
             parts = content.get("parts", [])
@@ -135,7 +141,7 @@ class ResearchAgent:
                         break
                 if not direct_text and parts:
                     direct_text = parts[-1].get("text", "")
-                return {"answer": direct_text, "sources": []}
+                return {"answer": direct_text, "sources": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             # If we reached here, the model requested `web_search`
             tool_name = function_call["name"]
@@ -176,9 +182,14 @@ class ResearchAgent:
             second_response.raise_for_status()
             second_response_json = second_response.json()
 
+            # Record usage of second turn
+            usage_2 = second_response_json.get("usageMetadata", {})
+            input_tokens += usage_2.get("promptTokenCount", 0)
+            output_tokens += usage_2.get("candidatesTokenCount", 0)
+
             second_candidates = second_response_json.get("candidates", [])
             if not second_candidates:
-                return {"answer": "Error generating final answer.", "sources": urls}
+                return {"answer": "Error generating final answer.", "sources": urls, "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             # Find the actual response part (avoiding reasoning thoughts)
             second_parts = second_candidates[0].get("content", {}).get("parts", [])
@@ -189,13 +200,11 @@ class ResearchAgent:
                     break
             if not final_text and second_parts:
                 final_text = second_parts[-1].get("text", "")
-            return {"answer": final_text, "sources": urls}
+            return {"answer": final_text, "sources": urls, "input_tokens": input_tokens, "output_tokens": output_tokens}
 
     async def _run_openrouter(self, query: str) -> dict:
         """
-        Orchestrates the tool-calling loop using OpenRouter's OpenAI-compatible API.
-        
-        This exists to provide a fallback if the user configures OpenRouter instead of Gemini directly.
+        Orchestrates the tool-calling loop using OpenRouter's OpenAI-compatible API and tracks token usage.
         """
         api_key = settings.openrouter_api_key
         model = settings.openrouter_model
@@ -236,15 +245,23 @@ class ResearchAgent:
             "tools": openrouter_tools
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # First turn: Ask model if tool is needed
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             response_json = response.json()
 
+            # Record usage of first turn
+            usage_1 = response_json.get("usage", {})
+            input_tokens += usage_1.get("prompt_tokens", 0)
+            output_tokens += usage_1.get("completion_tokens", 0)
+
             choices = response_json.get("choices", [])
             if not choices:
-                return {"answer": "No answer returned from OpenRouter.", "sources": []}
+                return {"answer": "No answer returned from OpenRouter.", "sources": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             message = choices[0].get("message", {})
             tool_calls = message.get("tool_calls", [])
@@ -252,7 +269,7 @@ class ResearchAgent:
             if not tool_calls:
                 # No tool call; return direct answer
                 direct_text = message.get("content", "")
-                return {"answer": direct_text, "sources": []}
+                return {"answer": direct_text, "sources": [], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             # Model requested a tool call
             tool_call = tool_calls[0]
@@ -294,9 +311,14 @@ class ResearchAgent:
             second_response.raise_for_status()
             second_response_json = second_response.json()
 
+            # Record usage of second turn
+            usage_2 = second_response_json.get("usage", {})
+            input_tokens += usage_2.get("prompt_tokens", 0)
+            output_tokens += usage_2.get("completion_tokens", 0)
+
             second_choices = second_response_json.get("choices", [])
             if not second_choices:
-                return {"answer": "Error generating final answer.", "sources": urls}
+                return {"answer": "Error generating final answer.", "sources": urls, "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             final_text = second_choices[0].get("message", {}).get("content", "")
-            return {"answer": final_text, "sources": urls}
+            return {"answer": final_text, "sources": urls, "input_tokens": input_tokens, "output_tokens": output_tokens}

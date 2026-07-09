@@ -1,5 +1,6 @@
 import logging
-from typing import List, Dict, Any, Optional
+import operator
+from typing import List, Dict, Any, Optional, Annotated
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
@@ -9,20 +10,28 @@ from app.agents.document_agent import DocumentAgent
 from app.agents.analyst_agent import AnalystAgent
 from app.agents.writer_agent import WriterAgent
 from app.agents.reviewer_agent import ReviewerAgent
+from app.core.config import settings
+from app.core.pricing import calculate_llm_cost
 
 logger = logging.getLogger(__name__)
+
+
+def _get_current_model() -> str:
+    """
+    Returns the configured model string depending on whether Gemini directly or OpenRouter fallback is used.
+    """
+    return settings.gemini_model if settings.gemini_api_key else settings.openrouter_model
 
 
 class GraphState(BaseModel):
     """
     GraphState represents the shared memory schema of the LangGraph workflow.
 
-    Phase 5 adds four new fields to support the Reviewer Agent and Human-in-the-Loop:
-      - report_id: ties this graph run to a specific SQLite checkpoint thread.
-      - review_verdict: the structured output from ReviewerAgent.
-      - review_retries: counts how many times the reviewer has asked for a revision.
-        Capped at 2 to prevent infinite writer-reviewer loops.
-      - human_decision: set to "approved" or "rejected" once a human acts on the report.
+    Phase 5 adds:
+      - report_id, review_verdict, review_retries, human_decision.
+    Phase 7 adds:
+      - accumulated_tokens_input, accumulated_tokens_output, accumulated_cost_usd.
+        All three use operator.add reducers to safely aggregate tokens and cost.
     """
     original_query: str = ""
     plan: List[str] = Field(default_factory=list)
@@ -36,24 +45,42 @@ class GraphState(BaseModel):
     review_verdict: Dict[str, Any] = Field(default_factory=dict)
     review_retries: int = 0
     human_decision: Optional[str] = None  # "approved" | "rejected" | None
+    # Phase 7 Cost Tracking fields (using Annotated + operator.add for accumulation)
+    accumulated_tokens_input: Annotated[int, operator.add] = 0
+    accumulated_tokens_output: Annotated[int, operator.add] = 0
+    accumulated_cost_usd: Annotated[float, operator.add] = 0.0
 
 
 async def planner_node(state: GraphState) -> Dict[str, Any]:
     """
-    Planner node: deconstructs the user query into focused sub-questions.
+    Planner node: deconstructs the user query into focused sub-questions and records costs.
     """
     planner = PlannerAgent()
-    sub_questions = await planner.plan(state.original_query)
-    return {"plan": sub_questions}
+    result = await planner.plan(state.original_query)
+    
+    sub_questions = result.get("plan", [])
+    in_tokens = result.get("input_tokens", 0)
+    out_tokens = result.get("output_tokens", 0)
+    
+    cost = calculate_llm_cost(_get_current_model(), in_tokens, out_tokens)
+    return {
+        "plan": sub_questions,
+        "accumulated_tokens_input": in_tokens,
+        "accumulated_tokens_output": out_tokens,
+        "accumulated_cost_usd": cost
+    }
 
 
 async def research_node(state: GraphState) -> Dict[str, Any]:
     """
-    Research node: runs web Tavily searches for each sub-question.
+    Research node: runs web Tavily searches for each sub-question and records costs.
     Runs in parallel with the document retrieval branch.
     """
     research_agent = ResearchAgent()
     compiled_results = []
+    
+    total_in_tokens = 0
+    total_out_tokens = 0
 
     for sub_q in state.plan:
         agent_result = await research_agent.run(sub_q)
@@ -62,14 +89,22 @@ async def research_node(state: GraphState) -> Dict[str, Any]:
             "answer": agent_result.get("answer", ""),
             "sources": agent_result.get("sources", [])
         })
+        total_in_tokens += agent_result.get("input_tokens", 0)
+        total_out_tokens += agent_result.get("output_tokens", 0)
 
-    return {"research_results": compiled_results}
+    cost = calculate_llm_cost(_get_current_model(), total_in_tokens, total_out_tokens)
+    return {
+        "research_results": compiled_results,
+        "accumulated_tokens_input": total_in_tokens,
+        "accumulated_tokens_output": total_out_tokens,
+        "accumulated_cost_usd": cost
+    }
 
 
 async def document_node(state: GraphState) -> Dict[str, Any]:
     """
     Document node: retrieves relevant text chunks from the pgvector database.
-    Runs in parallel with the web search branch.
+    Runs in parallel with the web search branch. No LLM calls here, so cost/tokens are 0.
     """
     doc_agent = DocumentAgent()
     compiled_results = []
@@ -88,14 +123,18 @@ async def document_node(state: GraphState) -> Dict[str, Any]:
 async def combine_node(state: GraphState) -> Dict[str, Any]:
     """
     Combine node: fan-in point after parallel branches.
-    Invokes AnalystAgent to clean, deduplicate, and compile evidence.
+    Invokes AnalystAgent to clean/deduplicate evidence, and records costs.
     """
     analyst = AnalystAgent()
-    evidence_list = await analyst.analyze(
+    result = await analyst.analyze(
         query=state.original_query,
         research_results=state.research_results,
         document_results=state.document_results
     )
+
+    evidence_list = result.get("evidence", [])
+    in_tokens = result.get("input_tokens", 0)
+    out_tokens = result.get("output_tokens", 0)
 
     unique_sources = list({
         item.get("source", "")
@@ -103,22 +142,22 @@ async def combine_node(state: GraphState) -> Dict[str, Any]:
         if item.get("source")
     })
 
+    cost = calculate_llm_cost(_get_current_model(), in_tokens, out_tokens)
     return {
         "evidence": evidence_list,
-        "sources": unique_sources
+        "sources": unique_sources,
+        "accumulated_tokens_input": in_tokens,
+        "accumulated_tokens_output": out_tokens,
+        "accumulated_cost_usd": cost
     }
 
 
 async def writer_node(state: GraphState) -> Dict[str, Any]:
     """
-    Writer node: compiles the final Markdown research report.
-    May be invoked more than once if the reviewer requests a revision.
-    Receives the reviewer's issues list via state so it can address them.
+    Writer node: compiles the final Markdown research report and records costs.
     """
     writer = WriterAgent()
 
-    # Build an augmented prompt context if the reviewer previously flagged issues.
-    # We pass issues_context to WriterAgent so it can address reviewer feedback.
     issues = state.review_verdict.get("issues", [])
     issues_context = ""
     if issues:
@@ -128,32 +167,50 @@ async def writer_node(state: GraphState) -> Dict[str, Any]:
             f"of this report. You MUST address ALL of them in this revision:\n{formatted}"
         )
 
-    report_md = await writer.write(
+    result = await writer.write(
         query=state.original_query + issues_context,
         evidence=state.evidence
     )
-    return {"final_report": report_md}
+    
+    report_md = result.get("final_report", "")
+    in_tokens = result.get("input_tokens", 0)
+    out_tokens = result.get("output_tokens", 0)
+
+    cost = calculate_llm_cost(_get_current_model(), in_tokens, out_tokens)
+    return {
+        "final_report": report_md,
+        "accumulated_tokens_input": in_tokens,
+        "accumulated_tokens_output": out_tokens,
+        "accumulated_cost_usd": cost
+    }
 
 
 async def reviewer_node(state: GraphState) -> Dict[str, Any]:
     """
-    Reviewer node: fact-checks the Writer's report against the plan and evidence.
-
-    Increments review_retries each time it runs. The route_after_review function
-    reads this counter to decide whether to send the report back to the writer
-    (if retries < 2) or proceed to human review (if approved or retries exhausted).
+    Reviewer node: fact-checks the Writer's report against the plan/evidence and records costs.
     """
     reviewer = ReviewerAgent()
-    verdict = await reviewer.review(
+    result = await reviewer.review(
         query=state.original_query,
         plan=state.plan,
         evidence=state.evidence,
         final_report=state.final_report
     )
+    
+    verdict = {
+        "approved": result.get("approved", True),
+        "issues": result.get("issues", [])
+    }
+    in_tokens = result.get("input_tokens", 0)
+    out_tokens = result.get("output_tokens", 0)
+
+    cost = calculate_llm_cost(_get_current_model(), in_tokens, out_tokens)
     return {
         "review_verdict": verdict,
-        # Increment the retry counter so route_after_review can cap the loop.
-        "review_retries": state.review_retries + 1
+        "review_retries": state.review_retries + 1,
+        "accumulated_tokens_input": in_tokens,
+        "accumulated_tokens_output": out_tokens,
+        "accumulated_cost_usd": cost
     }
 
 

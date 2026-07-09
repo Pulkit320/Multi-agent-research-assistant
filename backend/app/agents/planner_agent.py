@@ -43,24 +43,27 @@ class PlannerAgent:
             "You MUST respond ONLY with a JSON object containing a list of strings named `sub_questions`."
         )
 
-    async def plan(self, query: str) -> List[str]:
+    async def plan(self, query: str) -> dict:
         """
-        Generates a list of 1 to 4 research sub-questions for a query.
+        Generates a list of 1 to 4 research sub-questions for a query and tracks token usage.
         
         Args:
             query: The user's query string.
             
         Returns:
-            A list of sub-questions.
+            A dict containing:
+              - 'plan': List[str] (sub-questions)
+              - 'input_tokens': int
+              - 'output_tokens': int
         """
         if settings.gemini_api_key:
             return await self._plan_gemini(query)
         else:
             return await self._plan_openrouter(query)
 
-    async def _plan_gemini(self, query: str) -> List[str]:
+    async def _plan_gemini(self, query: str) -> dict:
         """
-        Calls Google's Gemini API directly, forcing structured JSON schema output.
+        Calls Google's Gemini API directly, forcing structured JSON schema output and extracting usage.
         """
         api_key = settings.gemini_api_key
         model = settings.gemini_model
@@ -91,19 +94,27 @@ class PlannerAgent:
             }
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             response_json = response.json()
 
+            # Extract token usage metadata from Gemini response format
+            usage = response_json.get("usageMetadata", {})
+            input_tokens = usage.get("promptTokenCount", 0)
+            output_tokens = usage.get("candidatesTokenCount", 0)
+
             candidates = response_json.get("candidates", [])
             if not candidates:
-                return [query] # fallback to original query if no candidates
+                return {"plan": [query], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             content = candidates[0].get("content", {})
             parts = content.get("parts", [])
             if not parts:
-                return [query]
+                return {"plan": [query], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             # Find the actual response part (avoiding reasoning thoughts)
             raw_text = ""
@@ -118,14 +129,14 @@ class PlannerAgent:
                 sub_questions = parsed.get("sub_questions", [])
                 # Enforce limit of 1 to 4 sub-questions
                 if not sub_questions:
-                    return [query]
-                return sub_questions[:4]
+                    return {"plan": [query], "input_tokens": input_tokens, "output_tokens": output_tokens}
+                return {"plan": sub_questions[:4], "input_tokens": input_tokens, "output_tokens": output_tokens}
             except (json.JSONDecodeError, TypeError):
-                return [query]
+                return {"plan": [query], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
-    async def _plan_openrouter(self, query: str) -> List[str]:
+    async def _plan_openrouter(self, query: str) -> dict:
         """
-        Calls OpenRouter API, forcing JSON output via JSON mode and structured prompting.
+        Calls OpenRouter API, forcing JSON output and extracting token usage.
         """
         api_key = settings.openrouter_api_key
         model = settings.openrouter_model
@@ -147,21 +158,29 @@ class PlannerAgent:
             "response_format": {"type": "json_object"}
         }
 
+        input_tokens = 0
+        output_tokens = 0
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             response_json = response.json()
 
+            # Extract token usage metadata from OpenAI-compatible response format
+            usage = response_json.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+
             choices = response_json.get("choices", [])
             if not choices:
-                return [query]
+                return {"plan": [query], "input_tokens": input_tokens, "output_tokens": output_tokens}
 
             raw_text = choices[0].get("message", {}).get("content", "")
             try:
                 parsed = json.loads(raw_text)
                 sub_questions = parsed.get("sub_questions", [])
                 if not sub_questions:
-                    return [query]
-                return sub_questions[:4]
+                    return {"plan": [query], "input_tokens": input_tokens, "output_tokens": output_tokens}
+                return {"plan": sub_questions[:4], "input_tokens": input_tokens, "output_tokens": output_tokens}
             except (json.JSONDecodeError, TypeError):
-                return [query]
+                return {"plan": [query], "input_tokens": input_tokens, "output_tokens": output_tokens}
