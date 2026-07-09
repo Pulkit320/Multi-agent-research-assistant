@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict, Any
 from app.graph import graph
 
 # Initialize router for research operations.
@@ -21,6 +21,7 @@ class ResearchResponse(BaseModel):
     can visualize the planning phase.
     """
     plan: List[str] = Field(default=[], description="The list of sub-questions generated in the planning phase.")
+    evidence: List[Dict[str, Any]] = Field(default=[], description="The consolidated list of evidence items compiled by the Analyst.")
     answer: str = Field(..., description="The synthesized answer from the agent.")
     sources: List[str] = Field(default=[], description="A list of URLs cited during research.")
 
@@ -44,6 +45,7 @@ async def run_research(request: ResearchRequest):
         
         return ResearchResponse(
             plan=result.get("plan", []),
+            evidence=result.get("evidence", []),
             answer=result.get("final_answer", ""),
             sources=result.get("sources", [])
         )

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import health, research
+from app.routers import health, research, documents
 
 def create_app() -> FastAPI:
     """
@@ -27,6 +27,7 @@ def create_app() -> FastAPI:
     # Include API routers.
     fastapi_app.include_router(health.router)
     fastapi_app.include_router(research.router)
+    fastapi_app.include_router(documents.router)
 
     return fastapi_app
 

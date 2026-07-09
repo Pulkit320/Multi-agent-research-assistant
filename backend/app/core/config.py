@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     openrouter_api_key: str = ""
     tavily_api_key: str = ""
+    database_url: str = ""
 
     # Model Configurations (centralized as per code style guidelines)
     gemini_model: str = "gemini-2.5-flash"
