@@ -56,11 +56,15 @@ A Pydantic model maintaining these memory fields:
 ---
 
 ## In My Own Words
-
+- This phase is about making a Planning agent that can plan the research process and then using langgraph to orchestrate the entire process. The Planning Agent breaks the user's query into smaller sub-questions and then the Research Agent searches the web for each sub-question.
 
 
 ---
 
 ## Questions I Still Have
-
-
+- **Question**: Explain in brief how does LangGraph work with some simple analogies.
+- **Answer**: 
+  Think of a LangGraph `StateGraph` as a **factory assembly line**:
+  1. **The Shared State (`GraphState`)** is a **conveyor belt carrying a clipboard**. As the clipboard travels down the belt, workers read from it and write new information onto it.
+  2. **The Nodes** are **specialized workers** standing along the belt. Each worker has a specific task (e.g., the *Planner* worker writes down research questions, the *Researcher* worker goes to look up web results, etc.). They take the clipboard, do their work, update the clipboard, and send it back.
+  3. **The Edges** are **routing tracks**. They guide where the clipboard goes next. Normal edges are straight tracks, while **conditional edges** act as a routing inspector who looks at the clipboard content and decides which worker to route it to next (e.g. "if the research isn't complete, route it back to search").

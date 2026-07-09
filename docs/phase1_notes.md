@@ -64,11 +64,11 @@ Let's walk through the actual sequence of calls when a user queries: *"Who won t
 ---
 
 ## In My Own Words
-
+- This phase is about making a Research Agent that can perform web searches. It uses a LLM to decide when to use the web search tool and then uses the web search tool to get the information it needs to answer the query. It then uses the LLM to synthesize the information and return the answer.
 
 
 ---
 
 ## Questions I Still Have
-
-
+- **Question**: What part of the code is responsible for making the web search call to Tavily?
+- **Answer**: The standalone async function `web_search(query: str)` located in [web_search.py](file:///home/pulkit/projects/multi-agent%20reseach%20assistant/backend/app/tools/web_search.py) is directly responsible. It uses the `httpx` HTTP client to make an asynchronous POST request to the Tavily API endpoint `https://api.tavily.com/search`, passing the API key loaded from configurations.

@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react'
+import { marked } from 'marked'
 
 /**
- * App is the root dashboard for the Multi-Agent Research Assistant (Phase 3).
- * 
+ * App is the root dashboard for the Multi-Agent Research Assistant (Phase 5).
+ *
  * It manages:
  * 1. Diagnostic connection checks to /health.
  * 2. File uploads to /documents/upload.
  * 3. Form submissions to POST /research.
- * 4. Progressive parallel graph visualizer.
- * 5. Structured evidence cards and comparative synthesized answers.
+ * 4. Progressive 6-node graph visualizer (planner -> research|document -> combine -> writer -> reviewer).
+ * 5. Structured evidence cards and compiled markdown report.
+ * 6. ReviewerAgent verdict panel with Approve / Reject buttons (human-in-the-loop).
  */
 function App() {
   // Connection diagnostics
@@ -27,12 +29,30 @@ function App() {
   const [evidence, setEvidence] = useState([])
   const [answer, setAnswer] = useState('')
   const [sources, setSources] = useState([])
+  const [finalReport, setFinalReport] = useState('')
+  // Phase 5: reviewer verdict and human-decision state
+  const [reportId, setReportId] = useState('')
+  const [reviewVerdict, setReviewVerdict] = useState(null)   // {approved, issues}
+  const [humanDecision, setHumanDecision] = useState(null)   // 'approved' | 'rejected' | null
+  const [isApproving, setIsApproving] = useState(false)
   
-  // Execution states for parallel graph visualization
-  const [isPlanning, setIsPlanning] = useState(false)
-  const [isResearchingParallel, setIsResearchingParallel] = useState(false)
-  const [isSynthesizing, setIsSynthesizing] = useState(false)
+  // Phase 6 Unified Execution statuses
+  const [nodeStatuses, setNodeStatuses] = useState({
+    planner: 'pending',        // 'pending' | 'in-progress' | 'completed'
+    research: 'pending',
+    document: 'pending',
+    combine: 'pending',
+    writer: 'pending',
+    reviewer: 'pending',
+    human_review: 'pending'
+  })
+  const [isGraphRunning, setIsGraphRunning] = useState(false)
   const [researchError, setResearchError] = useState('')
+
+  // Phase 7 Cost Tracking states
+  const [totalCost, setTotalCost] = useState(0.0)
+  const [tokensInput, setTokensInput] = useState(0)
+  const [tokensOutput, setTokensOutput] = useState(0)
 
   const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -106,65 +126,145 @@ function App() {
    * Triggers planning step, parallel research/RAG steps, analyst merge step,
    * and final synthesized response reveal.
    */
-  const handleResearchSubmit = async (e) => {
+  /**
+   * Submits query to GET /research/stream Server-Sent Events (SSE) endpoint.
+   * 
+   * Opens a persistent connection that receives node start and finish events
+   * in real-time, mapping them to the progressive workflow monitor.
+   */
+  const handleResearchSubmit = (e) => {
     e.preventDefault()
     if (!query.trim()) return
 
-    // Clear previous graph outputs
+    // 1. Reset all local state variables
     setPlan([])
     setEvidence([])
     setAnswer('')
+    setFinalReport('')
     setSources([])
     setResearchError('')
-    
-    // Set execution step 1: Planning
-    setIsPlanning(true)
-    setIsResearchingParallel(false)
-    setIsSynthesizing(false)
+    setReportId('')
+    setReviewVerdict(null)
+    setHumanDecision(null)
+    setTotalCost(0.0)
+    setTokensInput(0)
+    setTokensOutput(0)
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/research`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ query: query.trim() })
-      })
+    // Reset workflow monitor node statuses
+    setNodeStatuses({
+      planner: 'pending',
+      research: 'pending',
+      document: 'pending',
+      combine: 'pending',
+      writer: 'pending',
+      reviewer: 'pending',
+      human_review: 'pending'
+    })
+    setIsGraphRunning(true)
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.detail || `Server returned ${response.status}`)
-      }
+    // 2. Build the SSE connection URL
+    const url = `${API_BASE_URL}/research/stream?query=${encodeURIComponent(query.trim())}`
+    const eventSource = new EventSource(url)
 
-      const data = await response.json()
-      
-      // Reveal Step 1: Planner Node completes
-      setPlan(data.plan || [])
-      setIsPlanning(false)
-      
-      // Step 2: Web Research & Document RAG run in parallel
-      setIsResearchingParallel(true)
-      
-      setTimeout(() => {
-        setIsResearchingParallel(false)
+    // 3. Register message event handler to process real-time updates
+    eventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        const eventName = payload.event
+
+        if (eventName === 'start') {
+          // Received session UUID from the server
+          setReportId(payload.report_id || '')
+        } 
         
-        // Step 3: Analyst combines findings & LLM synthesizes answer
-        setIsSynthesizing(true)
+        else if (eventName === 'node_start') {
+          // Transition the specific node to in-progress status
+          const node = payload.node
+          setNodeStatuses((prev) => ({ ...prev, [node]: 'in-progress' }))
+          
+          // Special case: planner node start maps to clearing plan array
+          if (node === 'planner') {
+            setPlan([])
+          }
+          // Special case: parallel research branches
+          if (node === 'research' || node === 'document') {
+            setNodeStatuses((prev) => ({
+              ...prev,
+              research: prev.research === 'completed' ? 'completed' : 'in-progress',
+              document: prev.document === 'completed' ? 'completed' : 'in-progress'
+            }))
+          }
+        } 
         
-        setTimeout(() => {
-          setEvidence(data.evidence || [])
-          setAnswer(data.answer)
+        else if (eventName === 'node_finish') {
+          // Transition the specific node to completed status
+          const node = payload.node
+          const data = payload.data || {}
+          setNodeStatuses((prev) => ({ ...prev, [node]: 'completed' }))
+
+          // Special case: parallel branches should both show completed
+          if (node === 'research' || node === 'document') {
+            setNodeStatuses((prev) => ({ ...prev, [node]: 'completed' }))
+          }
+
+          // Real-time cost and token counts update
+          if (data.accumulated_cost_usd !== undefined) setTotalCost(data.accumulated_cost_usd)
+          if (data.accumulated_tokens_input !== undefined) setTokensInput(data.accumulated_tokens_input)
+          if (data.accumulated_tokens_output !== undefined) setTokensOutput(data.accumulated_tokens_output)
+
+          // Populate step-specific output data in real-time
+          if (node === 'planner') {
+            setPlan(data.plan || [])
+          } else if (node === 'combine') {
+            setEvidence(data.evidence || [])
+            setSources(data.sources || [])
+          } else if (node === 'writer') {
+            setFinalReport(data.final_report || '')
+          } else if (node === 'reviewer') {
+            setReviewVerdict(data.review_verdict || null)
+          }
+        } 
+        
+        else if (eventName === 'paused') {
+          // Hit the human-in-the-loop interrupt block
+          const data = payload.data || {}
+          setReviewVerdict(data.review_verdict || null)
+          setNodeStatuses((prev) => ({ ...prev, human_review: 'in-progress' }))
+          if (data.accumulated_cost_usd !== undefined) setTotalCost(data.accumulated_cost_usd)
+          if (data.accumulated_tokens_input !== undefined) setTokensInput(data.accumulated_tokens_input)
+          if (data.accumulated_tokens_output !== undefined) setTokensOutput(data.accumulated_tokens_output)
+          setIsGraphRunning(false)
+        } 
+        
+        else if (eventName === 'done') {
+          // Graph completed execution (approved or rejected)
+          const data = payload.data || {}
+          setHumanDecision(data.human_decision || 'approved')
+          setFinalReport(data.final_report || '')
           setSources(data.sources || [])
-          setIsSynthesizing(false)
-        }, 1800)
-      }, 2200)
+          setNodeStatuses((prev) => ({ ...prev, human_review: 'completed' }))
+          if (data.accumulated_cost_usd !== undefined) setTotalCost(data.accumulated_cost_usd)
+          if (data.accumulated_tokens_input !== undefined) setTokensInput(data.accumulated_tokens_input)
+          if (data.accumulated_tokens_output !== undefined) setTokensOutput(data.accumulated_tokens_output)
+          setIsGraphRunning(false)
+          eventSource.close()
+        } 
+        
+        else if (eventName === 'error') {
+          setResearchError(payload.status || 'An error occurred during graph execution.')
+          setIsGraphRunning(false)
+          eventSource.close()
+        }
+      } catch (err) {
+        console.error('Failed to parse SSE event data:', err)
+      }
+    }
 
-    } catch (err) {
-      console.error('Error running research graph:', err)
-      setResearchError(err.message || 'Failed to complete research request.')
-      setIsPlanning(false)
-      setIsResearchingParallel(false)
-      setIsSynthesizing(false)
+    eventSource.onerror = (err) => {
+      console.error('SSE connection error:', err)
+      setResearchError('Connection to server lost. Please retry.')
+      setIsGraphRunning(false)
+      eventSource.close()
     }
   }
 
@@ -321,23 +421,23 @@ function App() {
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     placeholder="Compare the GDP goals in uploaded reports vs current web stats..."
-                    disabled={isPlanning || isResearchingParallel || isSynthesizing}
+                    disabled={isGraphRunning}
                     className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm text-white placeholder-neutral-600 focus:outline-none focus:border-purple-500 disabled:opacity-50 transition-colors"
                   />
                   
                   <button
                     id="submit-btn"
                     type="submit"
-                    disabled={isPlanning || isResearchingParallel || isSynthesizing || !query.trim()}
+                    disabled={isGraphRunning || !query.trim()}
                     className="bg-white hover:bg-neutral-200 text-neutral-950 font-semibold px-6 py-3 rounded-xl transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none cursor-pointer flex items-center justify-center space-x-2"
                   >
-                    {isPlanning || isResearchingParallel || isSynthesizing ? (
+                    {isGraphRunning ? (
                       <>
                         <svg className="animate-spin h-4 w-4 text-neutral-950" fill="none" viewBox="0 0 24 24">
                           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                         </svg>
-                        <span>Running Graph...</span>
+                        <span>Running...</span>
                       </>
                     ) : (
                       <span>Search</span>
@@ -355,50 +455,81 @@ function App() {
             )}
 
             {/* State Graph Visualizer & Results board */}
-            {(isPlanning || isResearchingParallel || isSynthesizing || plan.length > 0 || evidence.length > 0 || answer) && (
+            {(isGraphRunning || plan.length > 0 || evidence.length > 0 || finalReport) && (
               <div className="border-t border-neutral-850 pt-6 space-y-6">
                 
-                {/* 1. LangGraph State Visualization Panel */}
+                {/* 1. LangGraph State Visualization Panel — 6 nodes */}
                 <div className="bg-neutral-950/60 border border-neutral-900 rounded-xl p-5 space-y-4">
-                  <h3 className="text-xs font-semibold uppercase text-neutral-400 tracking-wider">
-                    LangGraph Workflow Monitor
-                  </h3>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-900 pb-3.5">
+                    <h3 className="text-xs font-semibold uppercase text-neutral-400 tracking-wider">
+                      LangGraph Workflow Monitor
+                    </h3>
+                    {tokensInput > 0 && (
+                      <div className="flex flex-wrap items-center gap-3 text-3xs font-mono text-neutral-450 bg-neutral-900/60 px-3 py-1.5 rounded-lg border border-neutral-850">
+                        <span>Input: <strong className="text-neutral-300">{tokensInput.toLocaleString()}</strong> tkn</span>
+                        <span>Output: <strong className="text-neutral-300">{tokensOutput.toLocaleString()}</strong> tkn</span>
+                        <span className="text-purple-400 font-semibold bg-purple-950/40 px-2 py-0.5 rounded border border-purple-900/50">
+                          Cost: ${totalCost.toFixed(6)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                   
-                  <div className="grid grid-cols-4 gap-3 text-center text-xs">
+                  <div className="grid grid-cols-6 gap-2 text-center text-xs">
                     {/* Planner Node */}
-                    <div className={`p-3.5 rounded-xl border transition-all ${
-                      isPlanning ? 'bg-amber-950/40 border-amber-500 text-amber-300 animate-pulse' :
-                      plan.length > 0 ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
+                    <div className={`p-3 rounded-xl border transition-all ${
+                      nodeStatuses.planner === 'in-progress' ? 'bg-amber-950/40 border-amber-500 text-amber-300 animate-pulse' :
+                      nodeStatuses.planner === 'completed' ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
                     }`}>
                       <div className="font-semibold">planner</div>
                       <div className="text-3xs mt-1 text-neutral-500">Node</div>
                     </div>
 
                     {/* Research Node */}
-                    <div className={`p-3.5 rounded-xl border transition-all ${
-                      isResearchingParallel ? 'bg-indigo-950/50 border-indigo-500 text-indigo-300 animate-pulse' :
-                      evidence.length > 0 || answer ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
+                    <div className={`p-3 rounded-xl border transition-all ${
+                      nodeStatuses.research === 'in-progress' ? 'bg-indigo-950/50 border-indigo-500 text-indigo-300 animate-pulse' :
+                      nodeStatuses.research === 'completed' ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
                     }`}>
                       <div className="font-semibold">research</div>
                       <div className="text-3xs mt-1 text-neutral-500">Parallel (Web)</div>
                     </div>
 
                     {/* Document Node */}
-                    <div className={`p-3.5 rounded-xl border transition-all ${
-                      isResearchingParallel ? 'bg-cyan-950/50 border-cyan-500 text-cyan-300 animate-pulse' :
-                      evidence.length > 0 || answer ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
+                    <div className={`p-3 rounded-xl border transition-all ${
+                      nodeStatuses.document === 'in-progress' ? 'bg-cyan-950/50 border-cyan-500 text-cyan-300 animate-pulse' :
+                      nodeStatuses.document === 'completed' ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
                     }`}>
                       <div className="font-semibold">document</div>
                       <div className="text-3xs mt-1 text-neutral-500">Parallel (RAG)</div>
                     </div>
 
                     {/* Combine Node */}
-                    <div className={`p-3.5 rounded-xl border transition-all ${
-                      isSynthesizing ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300 animate-pulse' :
-                      answer ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
+                    <div className={`p-3 rounded-xl border transition-all ${
+                      nodeStatuses.combine === 'in-progress' ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300 animate-pulse' :
+                      nodeStatuses.combine === 'completed' ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
                     }`}>
                       <div className="font-semibold">combine</div>
                       <div className="text-3xs mt-1 text-neutral-500">Merge (Analyst)</div>
+                    </div>
+
+                    {/* Writer Node */}
+                    <div className={`p-3 rounded-xl border transition-all ${
+                      nodeStatuses.writer === 'in-progress' ? 'bg-fuchsia-950/40 border-fuchsia-500 text-fuchsia-300 animate-pulse' :
+                      nodeStatuses.writer === 'completed' ? 'bg-purple-950/30 border-purple-800/80 text-purple-300' : 'bg-neutral-900/40 border-neutral-850 text-neutral-600'
+                    }`}>
+                      <div className="font-semibold">writer</div>
+                      <div className="text-3xs mt-1 text-neutral-500">Report</div>
+                    </div>
+
+                    {/* Reviewer Node */}
+                    <div className={`p-3 rounded-xl border transition-all ${
+                      nodeStatuses.reviewer === 'in-progress' ? 'bg-orange-950/50 border-orange-500 text-orange-300 animate-pulse' :
+                      nodeStatuses.reviewer === 'completed' && reviewVerdict?.approved === false ? 'bg-rose-950/40 border-rose-700 text-rose-300' :
+                      nodeStatuses.reviewer === 'completed' && reviewVerdict?.approved === true ? 'bg-green-950/40 border-green-700 text-green-300' :
+                      'bg-neutral-900/40 border-neutral-850 text-neutral-600'
+                    }`}>
+                      <div className="font-semibold">reviewer</div>
+                      <div className="text-3xs mt-1 text-neutral-500">Fact-Check</div>
                     </div>
                   </div>
                 </div>
@@ -458,20 +589,117 @@ function App() {
                   </div>
                 )}
 
-                {/* 4. Final Synthesized Response */}
-                {answer && (
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-semibold uppercase text-neutral-400 tracking-wider">
-                      Final Orchestrated Response
+                {/* 4. Reviewer Verdict Panel */}
+                {reviewVerdict && (
+                  <div className={`rounded-xl border p-5 space-y-3 ${
+                    reviewVerdict.approved
+                      ? 'bg-green-950/20 border-green-800/60'
+                      : 'bg-rose-950/20 border-rose-800/60'
+                  }`}>
+                    <h3 className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2"
+                        style={{color: reviewVerdict.approved ? '#4ade80' : '#f87171'}}>
+                      <span>{reviewVerdict.approved ? '✅' : '⚠️'}</span>
+                      <span>Reviewer Verdict — {reviewVerdict.approved ? 'Approved for Human Review' : 'Issues Found'}</span>
                     </h3>
-                    <div className="bg-neutral-950 border border-neutral-900 p-5 rounded-xl text-neutral-200 text-sm leading-relaxed whitespace-pre-wrap">
-                      {answer}
-                    </div>
+
+                    {!reviewVerdict.approved && reviewVerdict.issues?.length > 0 && (
+                      <ul className="space-y-1.5 pl-1">
+                        {reviewVerdict.issues.map((issue, idx) => (
+                          <li key={idx} className="flex items-start gap-2 text-sm text-rose-300">
+                            <span className="text-rose-500 font-mono shrink-0 mt-0.5">#{idx + 1}</span>
+                            <span>{issue}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {/* Human-in-the-loop buttons — only shown when awaiting a decision */}
+                    {humanDecision === null && reportId && (
+                      <div className="flex items-center gap-3 pt-2">
+                        <p className="text-xs text-neutral-500 flex-1">Awaiting your decision before this report is finalized.</p>
+                        <button
+                          id="btn-approve-report"
+                          disabled={isApproving}
+                          onClick={async () => {
+                            setIsApproving(true)
+                            try {
+                              const res = await fetch(`${API_BASE_URL}/report/${reportId}/approve`, { method: 'POST' })
+                              const d = await res.json()
+                              setHumanDecision(d.human_decision)
+                            } catch(e) { console.error('Approve failed', e) }
+                            setIsApproving(false)
+                          }}
+                          className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-green-900/60 border border-green-700 text-green-300 hover:bg-green-800/70 transition-all disabled:opacity-50"
+                        >
+                          {isApproving ? 'Approving…' : '✅ Approve'}
+                        </button>
+                        <button
+                          id="btn-reject-report"
+                          disabled={isApproving}
+                          onClick={async () => {
+                            setIsApproving(true)
+                            try {
+                              const res = await fetch(`${API_BASE_URL}/report/${reportId}/reject`, { method: 'POST' })
+                              const d = await res.json()
+                              setHumanDecision(d.human_decision)
+                            } catch(e) { console.error('Reject failed', e) }
+                            setIsApproving(false)
+                          }}
+                          className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-rose-900/60 border border-rose-700 text-rose-300 hover:bg-rose-800/70 transition-all disabled:opacity-50"
+                        >
+                          ❌ Reject
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Show final decision badge once the human has acted */}
+                    {humanDecision && (
+                      <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider border ${
+                        humanDecision === 'approved'
+                          ? 'bg-green-950/50 border-green-700 text-green-300'
+                          : 'bg-rose-950/50 border-rose-700 text-rose-300'
+                      }`}>
+                        {humanDecision === 'approved' ? '✅ FINAL — Human Approved' : '❌ REJECTED by Human'}
+                      </div>
+                    )}
                   </div>
                 )}
 
-                {/* 5. Unique Source links */}
-                {(sources.length > 0 && answer) && (
+                {/* 5. Compiled Report — with FINAL/REJECTED badge */}
+                {(finalReport || answer) && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-semibold uppercase text-neutral-400 tracking-wider">
+                        Compiled Research Report
+                      </h3>
+                      {humanDecision === 'approved' && (
+                        <span className="text-2xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-green-950/50 border border-green-700 text-green-300">
+                          ✅ Final
+                        </span>
+                      )}
+                      {humanDecision === 'rejected' && (
+                        <span className="text-2xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-rose-950/50 border border-rose-700 text-rose-300">
+                          ❌ Rejected
+                        </span>
+                      )}
+                    </div>
+                    {finalReport ? (
+                      <div
+                        className={`bg-neutral-950 border p-6 rounded-xl text-neutral-200 text-sm leading-relaxed research-report ${
+                          humanDecision === 'rejected' ? 'border-rose-900/60 opacity-60' : 'border-neutral-900'
+                        }`}
+                        dangerouslySetInnerHTML={{ __html: marked.parse(finalReport) }}
+                      />
+                    ) : (
+                      <div className="bg-neutral-950 border border-neutral-900 p-5 rounded-xl text-neutral-200 text-sm leading-relaxed whitespace-pre-wrap">
+                        {answer}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 6. Unique Source links */}
+                {(sources.length > 0 && (finalReport || answer)) && (
                   <div className="space-y-3">
                     <h3 className="text-sm font-semibold uppercase text-neutral-400 tracking-wider">Unique Citations</h3>
                     <ul className="space-y-1.5">

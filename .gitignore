@@ -13,3 +13,9 @@ npm-debug.log*
 
 # System files
 .DS_Store
+
+# SQLite checkpoint databases (LangGraph)
+*checkpoints.db
+*checkpoints.db-shm
+*checkpoints.db-wal
+checkpoints.db*

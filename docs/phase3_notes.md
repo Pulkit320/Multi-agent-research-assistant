@@ -54,11 +54,27 @@ The `AnalystAgent` filters out noise by extracting atomic claims into a validate
 ---
 
 ## In My Own Words
-
-
+- this phase it about making a RAG agent and architecting the final research assistant graph. The RAG agent is a research agent that can search the web and our local database for information. 
+- we run the web research node and RAG node in parallel to save time. 
+- Then the analyst agent combines and deduplicates the information from the web research node and RAG node. 
 
 ---
 
 ## Questions I Still Have
+- **Question**: Provide me with a simple workflow diagram explaining the analyst agent.
+- **Answer**: 
+  Here is the workflow showing how the `AnalystAgent` intercepts findings and outputs structured, deduplicated evidence:
 
-
+  ```mermaid
+  graph TD
+      A[Web Research Agent Results] -->|1. Raw findings list| C(AnalystAgent Node)
+      B[Document RAG Agent Chunks] -->|2. Raw PDF/TXT snippets| C
+      
+      C -->|3. Context Merging| D{LLM Turn}
+      D -->|4. Clean overlap & contradictions| E[Deduplicate Claims]
+      D -->|5. Label with web vs document| F[Apply Source Types]
+      D -->|6. Map URLs or pdf_id page numbers| G[Format Citations]
+      
+      E & F & G --> H[Validate against EvidenceList schema]
+      H -->|7. Write to state.evidence| I[Consolidated Evidence Board]
+  ```

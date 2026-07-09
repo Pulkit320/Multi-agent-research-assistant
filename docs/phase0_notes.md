@@ -73,8 +73,7 @@ Even though the code footprint is currently very minimal, we intentionally separ
 ---
 
 ## In My Own Words
-
-
+- This phase is about setting up the skeleton of our research assistant. We are creating the basic folder structure and putting it on github. This is an important step because it will help us to keep our code organized and easy to maintain.
 
 ---
 

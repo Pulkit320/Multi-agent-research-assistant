@@ -1,1 +1,101 @@
 @import "tailwindcss";
+
+/* Research Report Markdown Styling Overrides (Tailwind Reset overrides) */
+.research-report h1 {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #c084fc; /* purple-400 */
+  margin-top: 1.75rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid #262626; /* neutral-800 */
+  padding-bottom: 0.5rem;
+}
+
+.research-report h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: #e879f9; /* fuchsia-400 */
+  margin-top: 1.5rem;
+  margin-bottom: 0.85rem;
+  border-bottom: 1px solid #1f1f1f;
+  padding-bottom: 0.25rem;
+}
+
+.research-report h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #38bdf8; /* sky-400 */
+  margin-top: 1.25rem;
+  margin-bottom: 0.6rem;
+}
+
+.research-report p {
+  margin-bottom: 1rem;
+  line-height: 1.65;
+  color: #d4d4d4; /* neutral-300 */
+}
+
+.research-report ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+  color: #d4d4d4;
+}
+
+.research-report ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+  color: #d4d4d4;
+}
+
+.research-report li {
+  margin-bottom: 0.35rem;
+}
+
+.research-report table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1.25rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.85rem;
+  background-color: rgba(10, 10, 10, 0.4);
+}
+
+.research-report th {
+  background-color: #171717; /* neutral-900 */
+  color: #a3a3a3; /* neutral-400 */
+  font-weight: 600;
+  border: 1px solid #262626; /* neutral-800 */
+  padding: 0.6rem 0.85rem;
+  text-align: left;
+}
+
+.research-report td {
+  border: 1px solid #262626; /* neutral-800 */
+  padding: 0.6rem 0.85rem;
+  color: #d4d4d4;
+}
+
+.research-report tr:nth-child(even) {
+  background-color: rgba(23, 23, 23, 0.35);
+}
+
+.research-report a {
+  color: #c084fc;
+  text-decoration: underline;
+}
+
+.research-report a:hover {
+  color: #d8b4fe;
+}
+
+.research-report sup {
+  font-size: 0.75em;
+  line-height: 0;
+  position: relative;
+  vertical-align: baseline;
+  top: -0.4em;
+  color: #c084fc;
+  font-weight: bold;
+}
