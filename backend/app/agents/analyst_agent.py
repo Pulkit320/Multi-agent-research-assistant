@@ -182,7 +182,8 @@ class AnalystAgent:
         payload = {
             "model": model,
             "messages": messages,
-            "response_format": {"type": "json_object"}
+            "response_format": {"type": "json_object"},
+            "max_tokens": 3000
         }
 
         input_tokens = 0

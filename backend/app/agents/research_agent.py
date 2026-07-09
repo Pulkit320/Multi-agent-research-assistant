@@ -242,7 +242,8 @@ class ResearchAgent:
         payload = {
             "model": model,
             "messages": messages,
-            "tools": openrouter_tools
+            "tools": openrouter_tools,
+            "max_tokens": 1500
         }
 
         input_tokens = 0
@@ -304,7 +305,8 @@ class ResearchAgent:
             # Request final synthesized answer
             second_payload = {
                 "model": model,
-                "messages": messages
+                "messages": messages,
+                "max_tokens": 2000
             }
 
             second_response = await client.post(url, json=second_payload, headers=headers)

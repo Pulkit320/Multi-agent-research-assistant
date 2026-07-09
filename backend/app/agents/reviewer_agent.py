@@ -182,7 +182,8 @@ class ReviewerAgent:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            "response_format": {"type": "json_object"}
+            "response_format": {"type": "json_object"},
+            "max_tokens": 2000
         }
 
         input_tokens = 0

@@ -141,7 +141,8 @@ class WriterAgent:
 
         payload = {
             "model": model,
-            "messages": messages
+            "messages": messages,
+            "max_tokens": 4000
         }
 
         input_tokens = 0
